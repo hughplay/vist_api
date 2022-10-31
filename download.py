@@ -1,14 +1,11 @@
-# https://developers.google.com/drive/api/guides/api-specific-auth
-# https://developers.google.com/drive/api/quickstart/python
-# https://developers.google.com/drive/api/guides/manage-downloads
+import argparse
 import hashlib
-import os
+from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, DEFAULT_CHUNK_SIZE
 
 # If modifying these scopes, delete the file token.json.
@@ -18,9 +15,25 @@ SCOPES = [
 ]
 
 
-OUT_PATH = "/data/reason/vist"
-if not os.path.exists(OUT_PATH):
-    os.makedirs(OUT_PATH)
+def prepare_google_api_service():
+    creds = None
+    if Path("token.json").exists():
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "credentials.json", SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+
+    service = build("drive", "v3", credentials=creds)
+    return service
+
 
 
 def get_sha1_file_buffer(file_path):
@@ -37,10 +50,10 @@ def get_sha1_file_buffer(file_path):
 class MediaIoDownload(MediaIoBaseDownload):
     def __init__(self, file_path, request, chunksize=DEFAULT_CHUNK_SIZE):
         progress = 0
-        if os.path.exists(file_path):
+        if Path(file_path).exists():
             self._file_path = file_path
             fd = open(file_path, "ab")
-            progress = os.path.getsize(file_path)
+            progress = Path(file_path).stat().st_size
             print(f"Resuming download at {progress / 1024 / 1024:.2f} MB")
         else:
             self._file_path = file_path
@@ -52,30 +65,10 @@ class MediaIoDownload(MediaIoBaseDownload):
         self._fd.close()
 
 
-def main():
-    """Shows basic usage of the Drive v3 API.
-    Prints the names and ids of the first 10 files the user has access to.
-    """
-    creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-
-    service = build("drive", "v3", credentials=creds)
+def main(out_dir):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+    service = prepare_google_api_service()
 
     with open("file_list.txt") as f:
         lines = f.readlines()
@@ -87,7 +80,7 @@ def main():
     print("\n-------\nstart to download\n-------")
     for item in items:
         name, file_id, sha1sum = item
-        save_path = os.path.join(OUT_PATH, name)
+        save_path = out_dir / name
         print(f"\nDownloading {name} to {save_path}")
         max_resume_try = 3
         n_resume_try = 0
@@ -96,7 +89,7 @@ def main():
             if n_resume_try > max_resume_try:
                 print(f"Failed to download {name}")
                 break
-            if os.path.exists(save_path):
+            if save_path.exists():
                 print("File already exists, checking sha1sum...")
                 file_hash = get_sha1_file_buffer(save_path)
                 if file_hash == sha1sum:
@@ -105,10 +98,9 @@ def main():
                 else:
                     print(f"The hash is not correct. Resume download {name}.")
             try:
-                service_files = service.files()
-                request = service_files.get_media(fileId=file_id)
+                request = service.files().get_media(fileId=file_id)
                 max_try = 10
-                downloader = MediaIoDownload(save_path, request)
+                downloader = MediaIoDownload(str(save_path), request)
                 done = False
                 retry = 0
                 while done is False:
@@ -133,4 +125,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="vist",
+        help="The directory to save the downloaded files.",
+    )
+    args = parser.parse_args()
+    main(args.out_dir)
